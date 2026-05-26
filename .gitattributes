@@ -1,0 +1,13 @@
+# 跨平台换行符策略：仓库内统一 LF，检出时按平台自适应
+* text=auto
+
+# Python 源码强制 LF（Windows 的 Python 也完全兼容 LF）
+*.py text eol=lf
+
+# Shell 脚本强制 LF
+*.sh text eol=lf
+
+# Windows 专有文件保持 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
