@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
 
 from agent.llm_client import LLMClient, LLMResponse
 from agent.context import ContextManager
+from agent.models import DiagnosisRequest, DiagnosisResult, ToolCallTrace
+from observe.evidence_store import EvidenceStore
 from tools import ToolExecutor, ToolCall
 from observe.compressor import ObservationCompressor
 
@@ -60,15 +61,19 @@ class ReActLoop:
         tool_executor: ToolExecutor,
         context_manager: ContextManager,
         compressor: ObservationCompressor,
+        evidence_store: EvidenceStore | None = None,
     ):
         self.llm = llm_client
         self.executor = tool_executor
         self.context = context_manager
         self.compressor = compressor
+        self.evidence_store = evidence_store
 
         # 运行时状态
         self.iteration: int = 0
         self._done: bool = False
+        self.max_iterations: int = self.MAX_ITERATIONS
+        self._tool_traces: list[ToolCallTrace] = []
 
     async def run(self, user_input: str) -> str:
         """执行 ReAct 循环，返回最终诊断结论。
@@ -77,15 +82,24 @@ class ReActLoop:
             user_input: 用户输入的诊断问题，如 "orders 表为什么变慢了？"
 
         Returns:
-            str: Agent 的最终回复
+        str: Agent 的最终回复
         """
+        result = await self.run_result(DiagnosisRequest(question=user_input))
+        return result.answer
+
+    async def run_result(self, request: DiagnosisRequest | str) -> DiagnosisResult:
+        """执行 ReAct 循环，返回包含证据和工具轨迹的结构化结果。"""
+        if isinstance(request, str):
+            request = DiagnosisRequest(question=request)
+
         self.iteration = 0
         self._done = False
+        self._tool_traces = []
 
-        logger.info("ReAct loop started, user input: %s", user_input[:100])
+        logger.info("ReAct loop started, user input: %s", request.question[:100])
 
         # Step 1: 放入用户消息
-        self.context.add_user_message(user_input)
+        self.context.add_user_message(request.question)
 
         # Step 2: 主循环
         while not self._done:
@@ -93,9 +107,10 @@ class ReActLoop:
             logger.info("--- Iteration %d ---", self.iteration)
 
             # 达到最大迭代次数 → 强制终止
-            if self.iteration > self.MAX_ITERATIONS:
-                logger.warning("ReAct loop hit max iterations (%d)", self.MAX_ITERATIONS)
-                return await self._force_conclusion()
+            if self.iteration > self.max_iterations:
+                logger.warning("ReAct loop hit max iterations (%d)", self.max_iterations)
+                answer = await self._force_conclusion()
+                return self._build_result(request, answer, forced=True)
 
             # 调用 LLM
             messages = self.context.get_messages()
@@ -107,9 +122,10 @@ class ReActLoop:
                 await self._handle_tool_calls(response)
             else:
                 self._done = True
-                return self._finalize(response)
+                answer = self._finalize(response)
+                return self._build_result(request, answer)
 
-        return "[Agent] 异常退出。"
+        return self._build_result(request, "[Agent] 异常退出。", failed=True)
 
     # ------------------------------------------------------------------
     # 工具调用处理
@@ -154,6 +170,14 @@ class ReActLoop:
 
         # 压缩并加入上下文
         for result in results:
+            evidence_id = None
+            if self.evidence_store is not None:
+                evidence = self.evidence_store.save_tool_result(
+                    result,
+                    metadata={"iteration": self.iteration},
+                )
+                evidence_id = evidence.id
+
             compressed_text = self.compressor.compress(result.name, result)
 
             # 构造 tool 消息的内容 —— 失败时保留错误信息方便 LLM 调整策略
@@ -167,6 +191,13 @@ class ReActLoop:
                 tool_name=result.name,
                 content=tool_content,
             )
+            self._tool_traces.append(ToolCallTrace(
+                tool_call_id=result.tool_call_id,
+                tool_name=result.name,
+                success=result.success,
+                evidence_id=evidence_id,
+                error=result.error,
+            ))
 
     # ------------------------------------------------------------------
     # 终止处理
@@ -189,3 +220,26 @@ class ReActLoop:
         # 不传 tools → 强制 LLM 只输出文本，不再尝试调用工具
         response = await self.llm.chat(messages, tools=None)
         return response.content or "(Agent 无法在迭代限制内完成诊断)"
+
+    def _build_result(
+        self,
+        request: DiagnosisRequest,
+        answer: str,
+        forced: bool = False,
+        failed: bool = False,
+    ) -> DiagnosisResult:
+        """组装结构化诊断结果。"""
+        return DiagnosisResult(
+            answer=answer,
+            request=request,
+            tool_calls=list(self._tool_traces),
+            evidence_ids=[
+                trace.evidence_id for trace in self._tool_traces
+                if trace.evidence_id is not None
+            ],
+            iterations=self.iteration,
+            metadata={
+                "forced_conclusion": forced,
+                "failed": failed,
+            },
+        )

@@ -1,9 +1,16 @@
 """
 提示词模板 —— Agent 系统提示词和诊断相关的 prompt 片段。
 
-后续可扩展为模板引擎（Jinja2），支持按场景动态组装 system prompt。
-现阶段直接定义常量。
+PromptBuilder 负责把一次 Investigation 的上下文、工具集摘要和任务偏好
+组装成 system prompt。这样 agent 主循环只关心消息流，不直接拼 prompt。
 """
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from agent.models import DiagnosisRequest
 
 # ---------------------------------------------------------------------------
 # 主系统提示词
@@ -32,6 +39,43 @@ SYSTEM_PROMPT = """你是一个 MySQL 性能诊断专家（Database Holmes）。
 - DANGEROUS 级别的工具你无法调用（会被拒绝），不要尝试
 - 优化建议以 CREATE INDEX、调整配置参数为主，不要建议 DROP/ALTER 等破坏性操作
 """
+
+
+@dataclass
+class PromptBuilder:
+    """按调查请求动态组装系统提示词。"""
+
+    base_prompt: str = SYSTEM_PROMPT
+
+    def build(
+        self,
+        request: DiagnosisRequest,
+        toolsets: list[dict[str, Any]] | None = None,
+    ) -> str:
+        parts = [self.base_prompt.strip()]
+
+        if request.workflow:
+            parts.append(f"\n## 当前诊断流程\n优先按照 `{request.workflow}` 场景组织调查步骤。")
+
+        if toolsets:
+            parts.append("\n## 可用工具集")
+            for toolset in toolsets:
+                if not toolset.get("enabled", True):
+                    continue
+                tools = ", ".join(toolset.get("tools") or []) or "暂无工具"
+                parts.append(
+                    f"- {toolset.get('name')}: {toolset.get('description')}。"
+                    f"工具：{tools}"
+                )
+
+        if request.metadata:
+            metadata_lines = [
+                f"- {key}: {value}"
+                for key, value in request.metadata.items()
+            ]
+            parts.append("\n## 请求元信息\n" + "\n".join(metadata_lines))
+
+        return "\n".join(parts)
 
 # ---------------------------------------------------------------------------
 # 场景类提示词片段（后续按 Workflow 组装）

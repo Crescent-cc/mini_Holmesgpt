@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 from tools.base import BaseTool
+from tools.toolset import Toolset
 
 
 class ToolRegistry:
@@ -26,6 +27,7 @@ class ToolRegistry:
 
     def __init__(self):
         self._tools: dict[str, BaseTool] = {}
+        self._toolsets: dict[str, Toolset] = {}
 
     # ---- 注册 ----
 
@@ -39,6 +41,13 @@ class ToolRegistry:
         """批量注册工具。"""
         for tool in tools:
             self.register(tool)
+
+    def register_toolset(self, toolset: Toolset) -> None:
+        """注册一个工具集，并将其中启用的工具加入注册表。"""
+        if not toolset.name:
+            raise ValueError("Toolset name cannot be empty")
+        self._toolsets[toolset.name] = toolset
+        self.register_many(toolset.list_tools())
 
     # ---- 查询 ----
 
@@ -65,6 +74,16 @@ class ToolRegistry:
     def tool_names(self) -> list[str]:
         """返回所有已注册工具的名称列表（方便日志和调试）。"""
         return list(self._tools.keys())
+
+    @property
+    def toolsets(self) -> list[Toolset]:
+        """返回已注册工具集。"""
+        return list(self._toolsets.values())
+
+    @property
+    def toolset_descriptions(self) -> list[dict]:
+        """返回给 prompt / UI 使用的工具集摘要。"""
+        return [toolset.describe() for toolset in self._toolsets.values()]
 
     def __len__(self) -> int:
         return len(self._tools)

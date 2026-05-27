@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 
+from safety.approval import ApprovalPolicy
 from tools.base import BaseTool, RiskLevel, ToolCall, ToolResult
 from tools.registry import ToolRegistry
 
@@ -30,8 +31,13 @@ class ToolExecutor:
       - 工具调用的决策（由 LLM 负责）
     """
 
-    def __init__(self, registry: ToolRegistry):
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        approval_policy: ApprovalPolicy | None = None,
+    ):
         self.registry = registry
+        self.approval_policy = approval_policy or ApprovalPolicy()
 
     async def execute_one(self, tool_call: ToolCall) -> ToolResult:
         """执行单个工具调用。
@@ -58,24 +64,20 @@ class ToolExecutor:
                 ),
             )
 
-        # --- 风险分级处理 ---
-        if tool.risk_level == RiskLevel.DANGEROUS:
+        # --- 风险分级 / 审批处理 ---
+        approval = await self.approval_policy.evaluate(tool_call, tool.risk_level)
+        if not approval.approved:
             return ToolResult(
                 tool_call_id=tool_call.id,
                 name=tool_call.name,
                 success=False,
-                error=(
-                    f"工具 '{tool_call.name}' 属于 DANGEROUS 级别，"
-                    f"已拒绝自动执行。如需执行请联系 DBA 人工处理。"
-                ),
+                error=f"工具 '{tool_call.name}' 未获准执行：{approval.reason}",
             )
 
-        # APPROVAL 级别在 MVP 阶段暂不阻断
-        # 后续 HITL 模块的审批流程会在此处插入
         if tool.risk_level == RiskLevel.APPROVAL:
             logger.info(
-                "Tool '%s' requires approval (risk=%s), executing in MVP mode",
-                tool_call.name, tool.risk_level.value,
+                "Tool '%s' passed approval policy (risk=%s): %s",
+                tool_call.name, tool.risk_level.value, approval.reason,
             )
 
         # --- 实际执行 ---
