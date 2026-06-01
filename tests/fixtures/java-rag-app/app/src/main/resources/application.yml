@@ -1,0 +1,11 @@
+app:
+  ai:
+    rag:
+      rewrite:
+        enabled: true
+      search:
+        topk-short: 20
+        topk-medium: 12
+        topk-long: 8
+        min-score-short: 0.18
+        min-score-default: 0.28
