@@ -21,6 +21,29 @@ export type SpringRoute = {
   source?: string;
 };
 
+export type FrontendRouteCall = {
+  method: string;
+  path: string;
+  source: string;
+  line: number;
+  snippet: string;
+};
+
+export type RouteContractMismatchType =
+  | "none"
+  | "missing_backend_route"
+  | "method_mismatch"
+  | "similar_path_mismatch";
+
+export type RouteContract = {
+  frontend: FrontendRouteCall;
+  matched: boolean;
+  mismatchType: RouteContractMismatchType;
+  backendRoute?: SpringRoute;
+  closestBackendRoute?: SpringRoute;
+  summary: string;
+};
+
 export type CodeReference = {
   path: string;
   line: number;
@@ -69,6 +92,7 @@ export type RagDiagnosticFixture = {
   logs?: LogEntry[];
   gatewayRoutes?: GatewayRoute[];
   springRoutes?: SpringRoute[];
+  routeContracts?: RouteContract[];
   codeReferences?: CodeReference[];
   ragTraces?: RagTrace[];
   vectorSearches?: VectorSearchRecord[];

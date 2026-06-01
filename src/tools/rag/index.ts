@@ -3,6 +3,7 @@ import { Toolset } from "../toolset.ts";
 import type {
   CodeReference,
   DiagnosticToolResponse,
+  RouteContract,
   GatewayRoute,
   LogEntry,
   RagDiagnosticFixture,
@@ -25,6 +26,13 @@ type PathArgs = {
 type SearchCodeArgs = {
   query?: string;
   path?: string;
+  limit?: number;
+};
+
+type InspectRouteContractArgs = {
+  path?: string;
+  method?: string;
+  mismatchOnly?: boolean;
   limit?: number;
 };
 
@@ -196,6 +204,46 @@ class SearchCodeTool extends BaseTool<SearchCodeArgs, DiagnosticToolResponse<Cod
   }
 }
 
+class InspectRouteContractTool extends BaseTool<
+  InspectRouteContractArgs,
+  DiagnosticToolResponse<RouteContract>
+> {
+  private readonly fixture: RagDiagnosticFixture;
+  name = "inspect_route_contract";
+  description = "Inspect frontend API calls against Spring routes, including exact matches and route mismatches.";
+  parameters = {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Optional frontend or backend path fragment to inspect." },
+      method: { type: "string", description: "Optional HTTP method filter." },
+      mismatchOnly: { type: "boolean", description: "When true, return only unmatched route contracts." },
+      limit: { type: "number", description: "Maximum number of route contracts to return." },
+    },
+    required: [],
+  };
+
+  constructor(fixture: RagDiagnosticFixture) {
+    super();
+    this.fixture = fixture;
+  }
+
+  async run(args: InspectRouteContractArgs) {
+    const contracts = limited(
+      (this.fixture.routeContracts ?? []).filter((contract) =>
+        routeContractMatches(contract, args.path)
+        && textIncludes(contract.frontend.method, args.method)
+        && (!args.mismatchOnly || !contract.matched)
+      ),
+      args.limit,
+    );
+    const mismatchCount = contracts.filter((contract) => !contract.matched).length;
+    const summary = contracts.length > 0
+      ? `Found ${contracts.length} route contracts (${mismatchCount} mismatches).`
+      : "No route contracts matched the filters.";
+    return response(this.fixture, contracts, summary);
+  }
+}
+
 class InspectRagTraceTool extends BaseTool<InspectRagTraceArgs, DiagnosticToolResponse<RagTrace>> {
   private readonly fixture: RagDiagnosticFixture;
   name = "inspect_rag_trace";
@@ -274,6 +322,16 @@ function knowledgeBasesOverlap(left: number[] | undefined, right: number[] | und
   return right.some((id) => left.includes(id));
 }
 
+function routeContractMatches(contract: RouteContract, query: string | undefined): boolean {
+  if (!query?.trim()) {
+    return true;
+  }
+  return textIncludes(contract.frontend.path, query)
+    || textIncludes(contract.backendRoute?.path, query)
+    || textIncludes(contract.closestBackendRoute?.path, query)
+    || textIncludes(contract.summary, query);
+}
+
 export function createRagDiagnosticToolset(fixture: RagDiagnosticFixture): Toolset {
   return new Toolset({
     name: "rag-diagnostics",
@@ -283,6 +341,7 @@ export function createRagDiagnosticToolset(fixture: RagDiagnosticFixture): Tools
       new ListGatewayRoutesTool(fixture),
       new ListSpringRoutesTool(fixture),
       new SearchCodeTool(fixture),
+      new InspectRouteContractTool(fixture),
       new InspectRagTraceTool(fixture),
       new SearchVectorHitsTool(fixture),
     ],
@@ -295,6 +354,7 @@ export type {
   LogEntry,
   RagDiagnosticFixture,
   RagTrace,
+  RouteContract,
   SpringRoute,
   VectorSearchRecord,
 };

@@ -2,11 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { createRagDiagnosticToolset } from "../src/tools/rag/index.ts";
+import type { RagDiagnosticFixture } from "../src/tools/rag/fixtures.ts";
 import { ToolCall } from "../src/tools/base.ts";
 import { ToolExecutor } from "../src/tools/executor.ts";
 import { ToolRegistry } from "../src/tools/registry.ts";
 
-const fixture = {
+const fixture: RagDiagnosticFixture = {
   id: "interview-guide-rag-404",
   name: "interview-guide RAG path mismatch",
   logs: [
@@ -47,6 +48,26 @@ const fixture = {
       snippet: "@PostMapping(value = \"/api/rag-chat/sessions/{sessionId}/messages/stream\")",
     },
   ],
+  routeContracts: [
+    {
+      frontend: {
+        method: "POST",
+        path: "/api/rag/chat/sessions/{sessionId}/messages/stream",
+        source: "frontend/src/api/ragChat.ts",
+        line: 91,
+        snippet: "fetch(`${API_BASE_URL}/api/rag/chat/sessions/${sessionId}/messages/stream`, ...)",
+      },
+      matched: false,
+      mismatchType: "similar_path_mismatch",
+      closestBackendRoute: {
+        method: "POST",
+        path: "/api/rag-chat/sessions/{sessionId}/messages/stream",
+        handler: "RagChatController.sendMessageStream",
+        source: "app/src/main/java/interview/guide/modules/knowledgebase/RagChatController.java:101",
+      },
+      summary: "No matching Spring route for POST /api/rag/chat/sessions/{sessionId}/messages/stream; closest Spring route: POST /api/rag-chat/sessions/{sessionId}/messages/stream",
+    },
+  ],
   ragTraces: [
     {
       id: "trace_empty",
@@ -80,6 +101,7 @@ test("RAG diagnostic toolset registers Holmes-style read-only tools", () => {
   assert.equal(toolset.name, "rag-diagnostics");
   assert.deepEqual(registry.toolNames.sort(), [
     "inspect_rag_trace",
+    "inspect_route_contract",
     "list_gateway_routes",
     "list_spring_routes",
     "search_code",
@@ -94,6 +116,24 @@ test("RAG diagnostic toolset registers Holmes-style read-only tools", () => {
       tools: registry.toolNames,
     },
   ]);
+});
+
+test("RAG diagnostic tools expose route contract mismatches as first-class evidence", async () => {
+  const registry = new ToolRegistry();
+  registry.registerToolset(createRagDiagnosticToolset(fixture));
+  const executor = new ToolExecutor(registry);
+
+  const contractResult = await executor.executeOne(
+    new ToolCall("call_contract", "inspect_route_contract", {
+      path: "/api/rag/chat",
+      mismatchOnly: true,
+    }),
+  );
+
+  assert.equal(contractResult.success, true);
+  assert.match(JSON.stringify(contractResult.data), /similar_path_mismatch/);
+  assert.match(JSON.stringify(contractResult.data), /\/api\/rag\/chat\/sessions/);
+  assert.match(JSON.stringify(contractResult.data), /\/api\/rag-chat\/sessions/);
 });
 
 test("RAG diagnostic tools expose path evidence for a 404 investigation", async () => {

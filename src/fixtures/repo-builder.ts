@@ -1,7 +1,14 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join, relative, sep } from "node:path";
 
-import type { CodeReference, RagDiagnosticFixture, SpringRoute } from "../tools/rag/fixtures.ts";
+import type {
+  CodeReference,
+  FrontendRouteCall,
+  RagDiagnosticFixture,
+  RouteContract,
+  RouteContractMismatchType,
+  SpringRoute,
+} from "../tools/rag/fixtures.ts";
 
 export type BuildJavaRepoFixtureOptions = {
   repoRoot: string;
@@ -9,13 +16,7 @@ export type BuildJavaRepoFixtureOptions = {
   name: string;
 };
 
-type FrontendApiCall = {
-  method: string;
-  path: string;
-  source: string;
-  line: number;
-  snippet: string;
-};
+type FrontendApiCall = FrontendRouteCall;
 
 const SPRING_MAPPING_METHODS: Record<string, string> = {
   GetMapping: "GET",
@@ -31,9 +32,10 @@ export async function buildJavaRepoFixture(
   const files = await listFiles(options.repoRoot);
   const springRoutes = await extractSpringRoutes(options.repoRoot, files);
   const frontendCalls = await extractFrontendApiCalls(options.repoRoot, files);
+  const routeContracts = buildRouteContracts(frontendCalls, springRoutes);
   const codeReferences: CodeReference[] = [
     ...frontendCalls.map(frontendCallToCodeReference),
-    ...buildRouteContractReferences(frontendCalls, springRoutes),
+    ...buildRouteContractReferences(routeContracts),
     ...await extractRagPromptReferences(options.repoRoot, files),
     ...await extractRagConfigReferences(options.repoRoot, files),
   ];
@@ -42,6 +44,7 @@ export async function buildJavaRepoFixture(
     id: options.id,
     name: options.name,
     springRoutes,
+    routeContracts,
     codeReferences,
   };
 }
@@ -259,22 +262,60 @@ function frontendCallToCodeReference(call: FrontendApiCall): CodeReference {
   };
 }
 
-function buildRouteContractReferences(
+function buildRouteContracts(
   frontendCalls: FrontendApiCall[],
   springRoutes: SpringRoute[],
-): CodeReference[] {
-  return frontendCalls
-    .filter((call) => !springRoutes.some((route) => routesEquivalent(call.method, call.path, route)))
-    .map((call) => {
-      const closest = findClosestRoute(call, springRoutes);
-      const closestText = closest ? `; closest Spring route: ${closest.method} ${closest.path}` : "";
+): RouteContract[] {
+  return frontendCalls.map((call) => {
+    const backendRoute = springRoutes.find((route) => routesEquivalent(call.method, call.path, route));
+    if (backendRoute) {
       return {
-        path: call.source,
-        line: call.line,
-        symbol: `route_contract:${call.method} ${call.path}`,
-        snippet: `No matching Spring route for ${call.method} ${call.path}${closestText}`,
+        frontend: call,
+        matched: true,
+        mismatchType: "none",
+        backendRoute,
+        summary: `Frontend API call ${call.method} ${call.path} matches Spring route ${backendRoute.handler}.`,
       };
-    });
+    }
+
+    const closestBackendRoute = findClosestRoute(call, springRoutes);
+    const mismatchType = classifyMismatch(call, springRoutes, closestBackendRoute);
+    const closestText = closestBackendRoute
+      ? `; closest Spring route: ${closestBackendRoute.method} ${closestBackendRoute.path}`
+      : "";
+    return {
+      frontend: call,
+      matched: false,
+      mismatchType,
+      closestBackendRoute: closestBackendRoute ?? undefined,
+      summary: `No matching Spring route for ${call.method} ${call.path}${closestText}`,
+    };
+  });
+}
+
+function buildRouteContractReferences(routeContracts: RouteContract[]): CodeReference[] {
+  return routeContracts
+    .filter((contract) => !contract.matched)
+    .map((contract) => ({
+      path: contract.frontend.source,
+      line: contract.frontend.line,
+      symbol: `route_contract:${contract.frontend.method} ${contract.frontend.path}`,
+      snippet: contract.summary,
+    }));
+}
+
+function classifyMismatch(
+  call: FrontendApiCall,
+  springRoutes: SpringRoute[],
+  closestBackendRoute: SpringRoute | null,
+): RouteContractMismatchType {
+  if (springRoutes.some((route) => route.method !== call.method && routesEquivalent(call.method, call.path, { ...route, method: call.method }))) {
+    return "method_mismatch";
+  }
+  if (closestBackendRoute && normalizeRouteForCompare(closestBackendRoute.path) !== normalizeRouteForCompare(call.path)) {
+    return "similar_path_mismatch";
+  }
+  return "missing_backend_route";
 }
 
 function routesEquivalent(method: string, path: string, route: SpringRoute): boolean {
